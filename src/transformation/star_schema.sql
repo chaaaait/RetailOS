@@ -28,17 +28,20 @@ CREATE TABLE IF NOT EXISTS dim_customer (
 );
 
 CREATE TABLE IF NOT EXISTS dim_product (
-    product_key BIGINT,
+    product_key INTEGER,
     product_id VARCHAR,
-    product_name VARCHAR,
+    name VARCHAR,
     category VARCHAR,
+    brand VARCHAR,
     price DOUBLE
 );
 
 CREATE TABLE IF NOT EXISTS dim_store (
     store_key BIGINT,
     store_id VARCHAR,
-    store_name VARCHAR
+    store_name VARCHAR,
+    city VARCHAR,
+    region VARCHAR
 );
 
 CREATE TABLE IF NOT EXISTS dim_external_events (
