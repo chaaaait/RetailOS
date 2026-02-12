@@ -1,0 +1,6 @@
+venv/
+data/raw/
+data/quarantine/
+data/warehouse/
+*.parquet
+*.csv
