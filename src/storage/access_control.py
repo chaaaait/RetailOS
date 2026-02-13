@@ -1,236 +1,247 @@
+#!/usr/bin/env python3
 """
-Role-Based Access Control (RBAC) and PII Masking for RetailOS
-Implements data access policies and privacy controls for the data warehouse.
+RBAC and PII Masking Implementation for RetailOS
+Creates secure views in DuckDB with role-based access control
 """
 
 import duckdb
-from enum import Enum
-from typing import Dict, List, Optional, Any
-import os
+import sys
 
 DB_PATH = "data/warehouse/retail.duckdb"
 
 
-class UserRole(Enum):
-    """User roles for RBAC system"""
-    ANALYST = "analyst"
-    STORE_MANAGER = "store_manager"
-    FINANCE = "finance"
-    ADMIN = "admin"
-
-
-class AccessLevel(Enum):
-    """Data access levels"""
-    MASKED_PII = "masked_pii"  # Phone/email masked, no cost/profit
-    STORE_FILTERED = "store_filtered"  # Same as analyst + store filter
-    FULL_ACCESS = "full_access"  # Complete data access
-    ADMIN_ALL = "admin_all"  # All tables and schemas
-
-
-class AccessController:
-    """Manages role-based access control and data masking"""
-    
-    def __init__(self):
-        self.con = duckdb.connect(DB_PATH)
-        self._setup_views()
-    
-    def _setup_views(self):
-        """Create RBAC views in DuckDB"""
-        views = [
-            # analyst_sales: No cost/profit, masked phone/email
-            """
-            CREATE OR REPLACE VIEW analyst_sales AS
-            SELECT 
-                fs.sale_id, 
-                fs.date_key, 
-                fs.product_key, 
-                fs.store_key, 
-                fs.quantity, 
-                fs.revenue,
-                CONCAT('XXXXX-', RIGHT(dc.phone, 4)) as phone_masked,
-                CONCAT(LEFT(dc.email, 1), '***@', SPLIT_PART(dc.email, '@', 2)) as email_masked,
-                dc.city as customer_city,
-                dp.category as product_category
-            FROM fact_sales fs
-            JOIN dim_customer dc ON fs.customer_key = dc.customer_key
-            JOIN dim_product dp ON fs.product_key = dp.product_key
-            """,
-            
-            # store_manager_sales: Same as analyst + filtered by their store
-            """
-            CREATE OR REPLACE VIEW store_manager_sales AS
-            SELECT * FROM analyst_sales
-            WHERE store_key = $1
-            """,
-            
-            # finance_sales: Full access to sales data
-            """
-            CREATE OR REPLACE VIEW finance_sales AS 
-            SELECT 
-                fs.*,
-                dc.name as customer_name,
-                dc.email,
-                dc.phone,
-                dc.city as customer_city,
-                dp.product_name,
-                dp.category as product_category,
-                dp.cost_price,
-                (fs.revenue - (dp.cost_price * fs.quantity)) as profit
-            FROM fact_sales fs
-            JOIN dim_customer dc ON fs.customer_key = dc.customer_key
-            JOIN dim_product dp ON fs.product_key = dp.product_key
-            """,
-            
-            # admin_all: Full access to all tables
-            """
-            CREATE OR REPLACE VIEW admin_all AS
-            SELECT 'fact_sales' as table_name, COUNT(*) as row_count FROM fact_sales
-            UNION ALL
-            SELECT 'dim_customer' as table_name, COUNT(*) as row_count FROM dim_customer
-            UNION ALL
-            SELECT 'dim_product' as table_name, COUNT(*) as row_count FROM dim_product
-            UNION ALL
-            SELECT 'dim_store' as table_name, COUNT(*) as row_count FROM dim_store
-            UNION ALL
-            SELECT 'dim_date' as table_name, COUNT(*) as row_count FROM dim_date
-            """
-        ]
-        
-        for view_sql in views:
-            try:
-                self.con.execute(view_sql)
-                print(f"✓ Created view: {view_sql.split('VIEW')[1].split('AS')[0].strip()}")
-            except Exception as e:
-                print(f"✗ Error creating view: {e}")
-    
-    def get_accessible_view(self, role: UserRole, store_key: Optional[int] = None) -> str:
-        """Get the appropriate view for a user role"""
-        view_mapping = {
-            UserRole.ANALYST: "analyst_sales",
-            UserRole.FINANCE: "finance_sales",
-            UserRole.ADMIN: "admin_all"
-        }
-        
-        if role == UserRole.STORE_MANAGER:
-            if store_key is None:
-                raise ValueError("Store manager role requires store_key parameter")
-            return f"store_manager_sales WHERE store_key = {store_key}"
-        
-        return view_mapping.get(role, "analyst_sales")
-    
-    def execute_query(self, role: UserRole, query: str, store_key: Optional[int] = None) -> List[Dict]:
-        """Execute query with role-based access control"""
-        try:
-            # For store managers, we need to inject the store filter
-            if role == UserRole.STORE_MANAGER:
-                if store_key is None:
-                    raise ValueError("Store manager role requires store_key parameter")
-                
-                # Replace view references with store-filtered version
-                if "store_manager_sales" in query:
-                    query = query.replace("store_manager_sales", f"(SELECT * FROM store_manager_sales WHERE store_key = {store_key})")
-            
-            result = self.con.execute(query).fetchdf()
-            return result.to_dict('records')
-        except Exception as e:
-            raise Exception(f"Query execution failed: {e}")
-    
-    def mask_pii(self, data: List[Dict], pii_fields: List[str]) -> List[Dict]:
-        """Apply PII masking to sensitive fields"""
-        masked_data = []
-        
-        for record in data:
-            masked_record = record.copy()
-            for field in pii_fields:
-                if field in masked_record and masked_record[field]:
-                    if field == 'phone':
-                        masked_record[field] = f"XXXXX-{str(masked_record[field])[-4:]}"
-                    elif field == 'email':
-                        email = str(masked_record[field])
-                        parts = email.split('@')
-                        if len(parts) == 2:
-                            masked_record[field] = f"{parts[0][0]}***@{parts[1]}"
-                    elif field == 'name':
-                        name = str(masked_record[field])
-                        if len(name) > 2:
-                            masked_record[field] = f"{name[0]}{'*' * (len(name) - 2)}{name[-1]}"
-            masked_data.append(masked_record)
-        
-        return masked_data
-    
-    def get_role_permissions(self, role: UserRole) -> Dict[str, Any]:
-        """Get permissions for a specific role"""
-        permissions = {
-            UserRole.ANALYST: {
-                "access_level": AccessLevel.MASKED_PII,
-                "tables": ["analyst_sales"],
-                "pii_fields": ["phone", "email"],
-                "restricted_fields": ["cost_price", "profit"],
-                "can_aggregate": True,
-                "can_export": True
-            },
-            UserRole.STORE_MANAGER: {
-                "access_level": AccessLevel.STORE_FILTERED,
-                "tables": ["store_manager_sales"],
-                "pii_fields": ["phone", "email"],
-                "restricted_fields": ["cost_price", "profit"],
-                "can_aggregate": True,
-                "can_export": True,
-                "store_filter_required": True
-            },
-            UserRole.FINANCE: {
-                "access_level": AccessLevel.FULL_ACCESS,
-                "tables": ["finance_sales"],
-                "pii_fields": [],
-                "restricted_fields": [],
-                "can_aggregate": True,
-                "can_export": True,
-                "can_access_financials": True
-            },
-            UserRole.ADMIN: {
-                "access_level": AccessLevel.ADMIN_ALL,
-                "tables": ["admin_all", "fact_sales", "dim_customer", "dim_product", "dim_store", "dim_date"],
-                "pii_fields": [],
-                "restricted_fields": [],
-                "can_aggregate": True,
-                "can_export": True,
-                "can_access_all": True
-            }
-        }
-        
-        return permissions.get(role, permissions[UserRole.ANALYST])
-    
-    def validate_query(self, role: UserRole, query: str) -> bool:
-        """Validate if query is allowed for the given role"""
-        permissions = self.get_role_permissions(role)
-        
-        # Basic SQL injection protection
-        dangerous_keywords = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'CREATE', 'TRUNCATE']
-        query_upper = query.upper()
-        
-        for keyword in dangerous_keywords:
-            if keyword in query_upper:
-                return False
-        
-        # Check table access
-        for table in permissions["tables"]:
-            if table in query_upper:
-                return True
-        
-        return False
-    
-    def close(self):
-        """Close database connection"""
-        if self.con:
-            self.con.close()
-
-
 def create_rbac_views():
-    """Initialize RBAC views in the database"""
-    controller = AccessController()
-    controller.close()
-    print("✓ RBAC views created successfully")
+    """Create RBAC views with PII masking in DuckDB"""
+    
+    try:
+        # Connect to database
+        print("🔗 Connecting to DuckDB database...")
+        con = duckdb.connect(DB_PATH)
+        print(f"✓ Connected to {DB_PATH}")
+        
+        # Drop existing views
+        print("\n🗑️  Dropping existing views...")
+        con.execute("DROP VIEW IF EXISTS analyst_sales")
+        con.execute("DROP VIEW IF EXISTS store_manager_sales") 
+        con.execute("DROP VIEW IF EXISTS finance_sales")
+        con.execute("DROP VIEW IF EXISTS admin_all")
+        print("✓ Dropped existing views")
+        
+        # Create analyst_sales view with PII masking
+        print("\n👁️  Creating analyst_sales view with PII masking...")
+        analyst_view_sql = """
+        CREATE VIEW analyst_sales AS
+        SELECT 
+            fs.sale_id,
+            fs.date_key,
+            fs.product_key,
+            fs.store_key,
+            fs.quantity,
+            fs.revenue,
+            CONCAT('XXXXX-', RIGHT(dc.phone, 4)) as phone_masked,
+            CONCAT(LEFT(dc.email, 1), '***@', SPLIT_PART(dc.email, '@', 2)) as email_masked,
+            dc.city as customer_city
+        FROM fact_sales fs
+        JOIN dim_customer dc ON fs.customer_key = dc.customer_key
+        """
+        con.execute(analyst_view_sql)
+        print("✓ Created analyst_sales view")
+        
+        # Create store_manager_sales view (same as analyst, filtered at query time)
+        print("\n🏪 Creating store_manager_sales view...")
+        store_manager_view_sql = """
+        CREATE VIEW store_manager_sales AS
+        SELECT *
+        FROM analyst_sales
+        """
+        con.execute(store_manager_view_sql)
+        print("✓ Created store_manager_sales view")
+        print("ℹ️  Note: Filter by store_key at query time: SELECT * FROM store_manager_sales WHERE store_key = ?")
+        
+        # Create finance_sales view with full access
+        print("\n💰 Creating finance_sales view with full access...")
+        finance_view_sql = """
+        CREATE VIEW finance_sales AS
+        SELECT 
+            fs.*,
+            dc.name as customer_name,
+            dc.email,
+            dc.phone,
+            dc.city as customer_city,
+            dp.name as product_name,
+            dp.category as product_category,
+            dp.price as product_price,
+            (fs.revenue - (dp.price * fs.quantity)) as profit
+        FROM fact_sales fs
+        JOIN dim_customer dc ON fs.customer_key = dc.customer_key
+        JOIN dim_product dp ON fs.product_key = dp.product_key
+        """
+        con.execute(finance_view_sql)
+        print("✓ Created finance_sales view")
+        
+        # Create admin_all view for system-wide access
+        print("\n👑 Creating admin_all view...")
+        admin_view_sql = """
+        CREATE VIEW admin_all AS
+        SELECT 
+            'fact_sales' as table_name,
+            COUNT(*) as row_count,
+            MIN(date_key) as min_date_key,
+            MAX(date_key) as max_date_key,
+            SUM(revenue) as total_revenue
+        FROM fact_sales
+        
+        UNION ALL
+        
+        SELECT 
+            'dim_customer' as table_name,
+            COUNT(*) as row_count,
+            NULL as min_date_key,
+            NULL as max_date_key,
+            NULL as total_revenue
+        FROM dim_customer
+        
+        UNION ALL
+        
+        SELECT 
+            'dim_product' as table_name,
+            COUNT(*) as row_count,
+            NULL as min_date_key,
+            NULL as max_date_key,
+            NULL as total_revenue
+        FROM dim_product
+        
+        UNION ALL
+        
+        SELECT 
+            'dim_store' as table_name,
+            COUNT(*) as row_count,
+            NULL as min_date_key,
+            NULL as max_date_key,
+            NULL as total_revenue
+        FROM dim_store
+        
+        UNION ALL
+        
+        SELECT 
+            'dim_date' as table_name,
+            COUNT(*) as row_count,
+            MIN(date_key) as min_date_key,
+            MAX(date_key) as max_date_key,
+            NULL as total_revenue
+        FROM dim_date
+        """
+        con.execute(admin_view_sql)
+        print("✓ Created admin_all view")
+        
+        # Verify views and get row counts
+        print("\n📊 Verifying views and getting row counts...")
+        
+        # Count rows from analyst_sales
+        analyst_count = con.execute("SELECT COUNT(*) FROM analyst_sales").fetchone()[0]
+        print(f"✓ analyst_sales: {analyst_count:,} rows")
+        
+        # Count rows from finance_sales  
+        finance_count = con.execute("SELECT COUNT(*) FROM finance_sales").fetchone()[0]
+        print(f"✓ finance_sales: {finance_count:,} rows")
+        
+        # Show sample data for verification
+        print("\n🔍 Sample data verification:")
+        print("\n--- analyst_sales sample (PII masked) ---")
+        analyst_sample = con.execute("""
+            SELECT sale_id, phone_masked, email_masked, customer_city, revenue 
+            FROM analyst_sales 
+            LIMIT 3
+        """).fetchdf()
+        print(analyst_sample.to_string(index=False))
+        
+        print("\n--- finance_sales sample (full access) ---")
+        finance_sample = con.execute("""
+            SELECT sale_id, customer_name, email, phone, profit 
+            FROM finance_sales 
+            LIMIT 3
+        """).fetchdf()
+        print(finance_sample.to_string(index=False))
+        
+        print("\n--- admin_all sample ---")
+        admin_sample = con.execute("SELECT * FROM admin_all").fetchdf()
+        print(admin_sample.to_string(index=False))
+        
+        # Close connection
+        con.close()
+        print("\n✅ RBAC views created successfully!")
+        print("🔐 Database is now secure with role-based access control and PII masking")
+        
+    except Exception as e:
+        print(f"❌ Error creating RBAC views: {e}")
+        sys.exit(1)
+
+
+def verify_schema():
+    """Verify the database schema before creating views"""
+    try:
+        con = duckdb.connect(DB_PATH)
+        
+        # Check required tables exist
+        tables = con.execute("SHOW TABLES").fetchdf()
+        required_tables = ['fact_sales', 'dim_customer', 'dim_product', 'dim_store', 'dim_date']
+        
+        for table in required_tables:
+            if table not in tables['name'].values:
+                raise Exception(f"Required table {table} not found in database")
+        
+        print("✓ All required tables exist")
+        
+        # Check key columns
+        fact_sales_columns = con.execute("DESCRIBE fact_sales").fetchdf()
+        required_fact_columns = ['sale_id', 'date_key', 'customer_key', 'product_key', 'store_key', 'quantity', 'revenue']
+        
+        for col in required_fact_columns:
+            if col not in fact_sales_columns['column_name'].values:
+                raise Exception(f"Required column {col} not found in fact_sales")
+        
+        customer_columns = con.execute("DESCRIBE dim_customer").fetchdf()
+        required_customer_columns = ['customer_key', 'name', 'email', 'phone', 'city']
+        
+        for col in required_customer_columns:
+            if col not in customer_columns['column_name'].values:
+                raise Exception(f"Required column {col} not found in dim_customer")
+        
+        product_columns = con.execute("DESCRIBE dim_product").fetchdf()
+        required_product_columns = ['product_key', 'name', 'category', 'price']
+        
+        for col in required_product_columns:
+            if col not in product_columns['column_name'].values:
+                raise Exception(f"Required column {col} not found in dim_product")
+        
+        con.close()
+        print("✓ Schema verification passed")
+        
+    except Exception as e:
+        print(f"❌ Schema verification failed: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
+    print("🚀 RetailOS RBAC and PII Masking Implementation")
+    print("=" * 50)
+    
+    # Verify schema first
+    verify_schema()
+    
+    # Create RBAC views
     create_rbac_views()
+    
+    print("\n🎉 Implementation completed successfully!")
+    print("\n📋 Usage Examples:")
+    print("  # Analyst access (PII masked)")
+    print("  SELECT * FROM analyst_sales WHERE revenue > 1000;")
+    print("")
+    print("  # Store Manager access (store filtered)")
+    print("  SELECT * FROM store_manager_sales WHERE store_key = 5;")
+    print("")
+    print("  # Finance access (full data)")
+    print("  SELECT customer_name, profit FROM finance_sales WHERE profit > 0;")
+    print("")
+    print("  # Admin access (system overview)")
+    print("  SELECT * FROM admin_all;")

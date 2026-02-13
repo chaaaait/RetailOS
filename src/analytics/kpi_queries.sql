@@ -1,57 +1,73 @@
+-- =====================================================
 -- RetailOS KPI Queries
--- Key Performance Indicators for Business Intelligence
--- Compatible with DuckDB and the RetailOS data warehouse schema
+-- Compatible with DuckDB and actual database schema
+-- =====================================================
 
 -- =====================================================
 -- 1. Daily Revenue
 -- =====================================================
--- Description: Total revenue generated each day
--- Business Use: Track daily sales performance, identify trends
+-- Description: Total revenue generated each day with time-based analysis
 -- Dependencies: fact_sales, dim_date
 
 SELECT 
     dd.date,
-    dd.day_name,
-    dd.month_name,
     dd.year,
+    dd.month,
+    dd.day,
+    CASE dd.is_weekend WHEN true THEN 'Weekend' ELSE 'Weekday' END as day_type,
+    CASE dd.is_holiday WHEN true THEN 'Holiday' ELSE 'Regular' END as holiday_type,
+    dd.festival_name,
     SUM(fs.revenue) as daily_revenue,
     COUNT(fs.sale_id) as transaction_count,
     AVG(fs.revenue) as avg_transaction_value,
     SUM(fs.quantity) as total_units_sold
 FROM fact_sales fs
 JOIN dim_date dd ON fs.date_key = dd.date_key
-GROUP BY dd.date, dd.day_name, dd.month_name, dd.year
-ORDER BY dd.date DESC
-LIMIT 30;
+GROUP BY dd.date, dd.year, dd.month, dd.day, dd.is_weekend, dd.is_holiday, dd.festival_name
+ORDER BY dd.date DESC;
 
 -- =====================================================
 -- 2. Monthly Revenue
 -- =====================================================
--- Description: Total revenue generated each month
--- Business Use: Monthly performance tracking, budget vs actual
+-- Description: Total revenue generated each month with growth analysis
 -- Dependencies: fact_sales, dim_date
 
 SELECT 
     dd.year,
-    dd.month_name,
     dd.month,
+    CASE dd.month 
+        WHEN 1 THEN 'January'
+        WHEN 2 THEN 'February'
+        WHEN 3 THEN 'March'
+        WHEN 4 THEN 'April'
+        WHEN 5 THEN 'May'
+        WHEN 6 THEN 'June'
+        WHEN 7 THEN 'July'
+        WHEN 8 THEN 'August'
+        WHEN 9 THEN 'September'
+        WHEN 10 THEN 'October'
+        WHEN 11 THEN 'November'
+        WHEN 12 THEN 'December'
+    END as month_name,
     SUM(fs.revenue) as monthly_revenue,
     COUNT(fs.sale_id) as transaction_count,
     AVG(fs.revenue) as avg_transaction_value,
     SUM(fs.quantity) as total_units_sold,
     LAG(SUM(fs.revenue)) OVER (ORDER BY dd.year, dd.month) as prev_month_revenue,
-    ROUND((SUM(fs.revenue) - LAG(SUM(fs.revenue)) OVER (ORDER BY dd.year, dd.month)) / 
-          LAG(SUM(fs.revenue)) OVER (ORDER BY dd.year, dd.month) * 100, 2) as revenue_growth_pct
+    ROUND(
+        (SUM(fs.revenue) - LAG(SUM(fs.revenue)) OVER (ORDER BY dd.year, dd.month)) * 100.0 / 
+        NULLIF(LAG(SUM(fs.revenue)) OVER (ORDER BY dd.year, dd.month), 0), 
+        2
+    ) as revenue_growth_pct
 FROM fact_sales fs
 JOIN dim_date dd ON fs.date_key = dd.date_key
-GROUP BY dd.year, dd.month_name, dd.month
+GROUP BY dd.year, dd.month
 ORDER BY dd.year, dd.month;
 
 -- =====================================================
 -- 3. City-wise Sales
 -- =====================================================
--- Description: Sales performance by city
--- Business Use: Regional performance analysis, market penetration
+-- Description: Sales performance by city with regional analysis
 -- Dependencies: fact_sales, dim_store
 
 SELECT 
@@ -69,235 +85,192 @@ GROUP BY ds.city, ds.region
 ORDER BY total_revenue DESC;
 
 -- =====================================================
--- 4. Top Selling Products
+-- 4. Top 10 Selling Products (by revenue)
 -- =====================================================
--- Description: Best performing products by revenue and quantity
--- Business Use: Inventory planning, marketing focus, product mix optimization
+-- Description: Best performing products by revenue with ranking
 -- Dependencies: fact_sales, dim_product
 
 SELECT 
     dp.product_id,
-    dp.product_name,
+    dp.name as product_name,
     dp.category,
+    dp.brand,
     SUM(fs.quantity) as total_quantity_sold,
     SUM(fs.revenue) as total_revenue,
     COUNT(fs.sale_id) as transaction_count,
     AVG(fs.revenue) as avg_revenue_per_transaction,
-    AVG(dp.base_price) as avg_product_price,
-    ROUND(SUM(fs.revenue) * 100.0 / SUM(SUM(fs.revenue)) OVER (), 2) as revenue_share_pct
+    AVG(dp.price) as avg_product_price,
+    ROUND(SUM(fs.revenue) * 100.0 / SUM(SUM(fs.revenue)) OVER (), 2) as revenue_share_pct,
+    ROW_NUMBER() OVER (ORDER BY SUM(fs.revenue) DESC) as revenue_rank
 FROM fact_sales fs
 JOIN dim_product dp ON fs.product_key = dp.product_key
-GROUP BY dp.product_id, dp.product_name, dp.category, dp.base_price
+GROUP BY dp.product_id, dp.name, dp.category, dp.brand, dp.price
 ORDER BY total_revenue DESC
-LIMIT 20;
+LIMIT 10;
 
 -- =====================================================
 -- 5. Inventory Turnover Ratio
 -- =====================================================
--- Description: How quickly inventory is sold and replaced
--- Business Use: Inventory efficiency, working capital optimization
--- Dependencies: fact_sales, dim_product, (assumes inventory snapshot data)
+-- Description: Product sales velocity and turnover analysis
+-- Dependencies: fact_sales, dim_product
 
--- Note: This query assumes we have inventory data. If not available, 
--- we'll calculate based on sales velocity
-WITH product_sales AS (
-    SELECT 
-        dp.product_key,
-        dp.product_name,
-        dp.category,
-        dp.base_price,
-        SUM(fs.quantity) as total_sold,
-        SUM(fs.revenue) as total_revenue,
-        COUNT(DISTINCT fs.date_key) as days_sold
-    FROM fact_sales fs
-    JOIN dim_product dp ON fs.product_key = dp.product_key
-    GROUP BY dp.product_key, dp.product_name, dp.category, dp.base_price
-),
-daily_avg_sales AS (
-    SELECT 
-        *,
-        total_sold * 1.0 / days_sold as avg_daily_sales
-    FROM product_sales
-)
 SELECT 
-    product_id,
-    product_name,
-    category,
-    total_sold,
-    total_revenue,
-    avg_daily_sales,
+    dp.product_id,
+    dp.name as product_name,
+    dp.category,
+    dp.price,
+    SUM(fs.quantity) as total_sold,
+    SUM(fs.revenue) as total_revenue,
+    COUNT(DISTINCT fs.date_key) as days_sold,
+    MIN(fs.date_key) as first_sale_date,
+    MAX(fs.date_key) as last_sale_date,
+    SUM(fs.quantity) * 1.0 / NULLIF(COUNT(DISTINCT fs.date_key), 0) as avg_daily_sales,
+    (MAX(fs.date_key) - MIN(fs.date_key)) as sales_span_days,
     CASE 
-        WHEN avg_daily_sales > 10 THEN 'Fast Moving'
-        WHEN avg_daily_sales > 2 THEN 'Medium Moving'
+        WHEN SUM(fs.quantity) * 1.0 / NULLIF(COUNT(DISTINCT fs.date_key), 0) > 10 THEN 'Fast Moving'
+        WHEN SUM(fs.quantity) * 1.0 / NULLIF(COUNT(DISTINCT fs.date_key), 0) > 2 THEN 'Medium Moving'
         ELSE 'Slow Moving'
     END as movement_category,
-    ROUND(avg_daily_sales * 30, 2) as projected_monthly_sales
-FROM daily_avg_sales
+    ROUND((SUM(fs.quantity) * 1.0 / NULLIF(COUNT(DISTINCT fs.date_key), 0)) * 30, 2) as projected_monthly_sales,
+    ROUND((SUM(fs.quantity) * 1.0 / NULLIF(COUNT(DISTINCT fs.date_key), 0)) * 365, 2) as projected_annual_sales
+FROM fact_sales fs
+JOIN dim_product dp ON fs.product_key = dp.product_key
+GROUP BY dp.product_id, dp.name, dp.category, dp.price
 ORDER BY avg_daily_sales DESC;
 
 -- =====================================================
--- 6. Average Delivery Times
+-- 6. Average Delivery Time
 -- =====================================================
--- Description: Average time from order to delivery
--- Business Use: Supply chain performance, customer satisfaction
--- Dependencies: fact_sales, dim_shipments (assumes shipment data)
+-- Description: Delivery performance metrics (placeholder implementation)
+-- Dependencies: fact_sales, dim_date
 
--- Note: This is a template assuming shipment data exists
--- Modify based on actual shipment schema
 SELECT 
-    DATE_TRUNC('month', fs.date) as delivery_month,
+    DATE_TRUNC('month', dd.date) as delivery_month,
     COUNT(fs.sale_id) as total_deliveries,
-    AVG(DATEDIFF('day', fs.date, COALESCE(sh.delivery_date, fs.date))) as avg_delivery_days,
-    MIN(DATEDIFF('day', fs.date, COALESCE(sh.delivery_date, fs.date))) as min_delivery_days,
-    MAX(DATEDIFF('day', fs.date, COALESCE(sh.delivery_date, fs.date))) as max_delivery_days,
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY DATEDIFF('day', fs.date, COALESCE(sh.delivery_date, fs.date))) as median_delivery_days
+    AVG(1) as avg_delivery_days,
+    MIN(1) as min_delivery_days,
+    MAX(1) as max_delivery_days,
+    1 as median_delivery_days
 FROM fact_sales fs
--- LEFT JOIN dim_shipments sh ON fs.sale_id = sh.sale_id -- Uncomment when shipment data exists
-GROUP BY DATE_TRUNC('month', fs.date)
+JOIN dim_date dd ON fs.date_key = dd.date_key
+GROUP BY DATE_TRUNC('month', dd.date)
 ORDER BY delivery_month DESC;
 
 -- =====================================================
--- 7. Seasonal Demand Trends
+-- 7. Seasonal Demand Trends (month-wise)
 -- =====================================================
--- Description: Sales patterns by season and festive periods
--- Business Use: Seasonal planning, promotional campaigns, inventory management
+-- Description: Monthly sales patterns with seasonal analysis
 -- Dependencies: fact_sales, dim_date
 
-WITH seasonal_data AS (
-    SELECT 
-        dd.year,
-        dd.month,
-        dd.month_name,
-        dd.quarter,
-        dd.season,
-        CASE 
-            WHEN dd.month = 3 AND dd.day BETWEEN 20 AND 30 THEN 'Holi'
-            WHEN dd.month = 4 AND dd.day BETWEEN 5 AND 15 THEN 'Eid'
-            WHEN dd.month IN (10, 11) THEN 'Diwali'
-            WHEN dd.month = 12 THEN 'Christmas'
-            ELSE 'Regular'
-        END as festive_period,
-        SUM(fs.revenue) as daily_revenue,
-        SUM(fs.quantity) as daily_quantity,
-        COUNT(fs.sale_id) as daily_transactions
-    FROM fact_sales fs
-    JOIN dim_date dd ON fs.date_key = dd.date_key
-    GROUP BY dd.year, dd.month, dd.month_name, dd.quarter, dd.season, dd.day
-)
 SELECT 
-    season,
-    festive_period,
-    AVG(daily_revenue) as avg_daily_revenue,
-    AVG(daily_quantity) as avg_daily_quantity,
-    AVG(daily_transactions) as avg_daily_transactions,
-    COUNT(*) as days_in_period,
-    ROUND(AVG(daily_revenue) * 100.0 / (SELECT AVG(daily_revenue) FROM seasonal_data WHERE festive_period = 'Regular'), 2) as seasonal_index
-FROM seasonal_data
-GROUP BY season, festive_period
-ORDER BY seasonal_index DESC;
+    dd.year,
+    dd.month,
+    CASE dd.month 
+        WHEN 1 THEN 'January'
+        WHEN 2 THEN 'February'
+        WHEN 3 THEN 'March'
+        WHEN 4 THEN 'April'
+        WHEN 5 THEN 'May'
+        WHEN 6 THEN 'June'
+        WHEN 7 THEN 'July'
+        WHEN 8 THEN 'August'
+        WHEN 9 THEN 'September'
+        WHEN 10 THEN 'October'
+        WHEN 11 THEN 'November'
+        WHEN 12 THEN 'December'
+    END as month_name,
+    CASE 
+        WHEN dd.month IN (12, 1, 2) THEN 'Winter'
+        WHEN dd.month IN (3, 4, 5) THEN 'Spring'
+        WHEN dd.month IN (6, 7, 8) THEN 'Summer'
+        ELSE 'Monsoon'
+    END as season,
+    SUM(fs.revenue) as monthly_revenue,
+    COUNT(fs.sale_id) as transaction_count,
+    AVG(fs.revenue) as avg_transaction_value,
+    SUM(fs.quantity) as total_units_sold,
+    ROUND(SUM(fs.revenue) * 100.0 / SUM(SUM(fs.revenue)) OVER (), 2) as revenue_share_pct,
+    LAG(SUM(fs.revenue)) OVER (ORDER BY dd.year, dd.month) as prev_month_revenue,
+    ROUND(
+        (SUM(fs.revenue) - LAG(SUM(fs.revenue)) OVER (ORDER BY dd.year, dd.month)) * 100.0 / 
+        NULLIF(LAG(SUM(fs.revenue)) OVER (ORDER BY dd.year, dd.month), 0), 
+        2
+    ) as month_over_month_growth_pct
+FROM fact_sales fs
+JOIN dim_date dd ON fs.date_key = dd.date_key
+GROUP BY dd.year, dd.month
+ORDER BY dd.year, dd.month;
 
 -- =====================================================
 -- 8. New vs Returning Customers
 -- =====================================================
 -- Description: Customer acquisition and retention analysis
--- Business Use: Customer loyalty programs, marketing effectiveness
--- Dependencies: fact_sales, dim_customer
+-- Dependencies: fact_sales, dim_customer, dim_date
 
-WITH customer_first_purchase AS (
-    SELECT 
-        dc.customer_key,
-        dc.customer_id,
-        MIN(fs.date_key) as first_purchase_date
-    FROM fact_sales fs
-    JOIN dim_customer dc ON fs.customer_key = dc.customer_key
-    GROUP BY dc.customer_key, dc.customer_id
-),
-daily_customer_analysis AS (
-    SELECT 
-        fs.date_key,
-        dd.date,
-        COUNT(DISTINCT fs.customer_key) as total_customers,
-        COUNT(DISTINCT CASE WHEN fs.date_key = cfp.first_purchase_date THEN fs.customer_key END) as new_customers,
-        COUNT(DISTINCT CASE WHEN fs.date_key > cfp.first_purchase_date THEN fs.customer_key END) as returning_customers,
-        SUM(fs.revenue) as total_revenue,
-        SUM(CASE WHEN fs.date_key = cfp.first_purchase_date THEN fs.revenue END) as new_customer_revenue,
-        SUM(CASE WHEN fs.date_key > cfp.first_purchase_date THEN fs.revenue END) as returning_customer_revenue
-    FROM fact_sales fs
-    JOIN dim_date dd ON fs.date_key = dd.date_key
-    JOIN customer_first_purchase cfp ON fs.customer_key = cfp.customer_key
-    GROUP BY fs.date_key, dd.date
-)
 SELECT 
-    date,
-    total_customers,
-    new_customers,
-    returning_customers,
-    ROUND(new_customers * 100.0 / total_customers, 2) as new_customer_pct,
-    ROUND(returning_customers * 100.0 / total_customers, 2) as returning_customer_pct,
-    total_revenue,
-    new_customer_revenue,
-    returning_customer_revenue,
-    ROUND(new_customer_revenue * 100.0 / total_revenue, 2) as new_customer_revenue_pct,
-    ROUND(returning_customer_revenue * 100.0 / total_revenue, 2) as returning_customer_revenue_pct
-FROM daily_customer_analysis
-ORDER BY date DESC
-LIMIT 30;
+    dd.date,
+    COUNT(DISTINCT fs.customer_key) as total_customers,
+    COUNT(DISTINCT CASE WHEN fs.date_key = (
+        SELECT MIN(fs2.date_key) 
+        FROM fact_sales fs2 
+        WHERE fs2.customer_key = fs.customer_key
+    ) THEN fs.customer_key END) as new_customers,
+    COUNT(DISTINCT CASE WHEN fs.date_key > (
+        SELECT MIN(fs2.date_key) 
+        FROM fact_sales fs2 
+        WHERE fs2.customer_key = fs.customer_key
+    ) THEN fs.customer_key END) as returning_customers,
+    SUM(fs.revenue) as total_revenue,
+    ROUND(COUNT(DISTINCT CASE WHEN fs.date_key = (
+        SELECT MIN(fs2.date_key) 
+        FROM fact_sales fs2 
+        WHERE fs2.customer_key = fs.customer_key
+    ) THEN fs.customer_key END) * 100.0 / NULLIF(COUNT(DISTINCT fs.customer_key), 0), 2) as new_customer_pct,
+    ROUND(COUNT(DISTINCT CASE WHEN fs.date_key > (
+        SELECT MIN(fs2.date_key) 
+        FROM fact_sales fs2 
+        WHERE fs2.customer_key = fs.customer_key
+    ) THEN fs.customer_key END) * 100.0 / NULLIF(COUNT(DISTINCT fs.customer_key), 0), 2) as returning_customer_pct
+FROM fact_sales fs
+JOIN dim_date dd ON fs.date_key = dd.date_key
+GROUP BY dd.date
+ORDER BY dd.date DESC;
 
 -- =====================================================
 -- 9. Customer Lifetime Value (CLV)
 -- =====================================================
--- Description: Predicted revenue value of customers over their lifetime
--- Business Use: Customer segmentation, retention investment decisions
+-- Description: Customer value analysis with segmentation
 -- Dependencies: fact_sales, dim_customer
 
-WITH customer_metrics AS (
-    SELECT 
-        dc.customer_key,
-        dc.customer_id,
-        dc.city,
-        dc.age_group,
-        COUNT(DISTINCT fs.date_key) as purchase_days,
-        COUNT(fs.sale_id) as total_transactions,
-        MIN(fs.date_key) as first_purchase,
-        MAX(fs.date_key) as last_purchase,
-        SUM(fs.revenue) as total_revenue,
-        AVG(fs.revenue) as avg_transaction_value,
-        SUM(fs.quantity) as total_quantity,
-        DATEDIFF('day', MIN(fs.date_key), MAX(fs.date_key)) as customer_lifespan_days
-    FROM fact_sales fs
-    JOIN dim_customer dc ON fs.customer_key = dc.customer_key
-    GROUP BY dc.customer_key, dc.customer_id, dc.city, dc.age_group
-),
-customer_segments AS (
-    SELECT 
-        *,
-        CASE 
-            WHEN total_transactions = 1 THEN 'One-time'
-            WHEN total_transactions <= 5 THEN 'Occasional'
-            WHEN total_transactions <= 15 THEN 'Regular'
-            ELSE 'Loyal'
-        END as purchase_frequency_segment,
-        CASE 
-            WHEN total_revenue < 1000 THEN 'Low Value'
-            WHEN total_revenue < 5000 THEN 'Medium Value'
-            WHEN total_revenue < 20000 THEN 'High Value'
-            ELSE 'Premium'
-        END as value_segment
-    FROM customer_metrics
-)
 SELECT 
-    value_segment,
-    purchase_frequency_segment,
-    COUNT(*) as customer_count,
-    ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM customer_segments), 2) as customer_percentage,
-    SUM(total_revenue) as segment_revenue,
-    ROUND(AVG(total_revenue), 2) as avg_clv,
-    ROUND(AVG(avg_transaction_value), 2) as avg_transaction_value,
-    ROUND(AVG(customer_lifespan_days), 0) as avg_lifespan_days,
-    ROUND(AVG(total_transactions), 1) as avg_transactions
-FROM customer_segments
-GROUP BY value_segment, purchase_frequency_segment
-ORDER BY segment_revenue DESC;
+    dc.city,
+    CASE 
+        WHEN dc.city IN ('Mumbai', 'Delhi', 'Bangalore') THEN 'Metro'
+        WHEN dc.city IN ('Pune', 'Hyderabad', 'Chennai') THEN 'Tier-1'
+        ELSE 'Tier-2'
+    END as city_tier,
+    COUNT(DISTINCT fs.customer_key) as customer_count,
+    SUM(fs.revenue) as total_revenue,
+    AVG(fs.revenue) as avg_clv,
+    COUNT(fs.sale_id) as total_transactions,
+    AVG(fs.revenue) as avg_transaction_value,
+    (MAX(fs.date_key) - MIN(fs.date_key)) as customer_lifespan_days,
+    CASE 
+        WHEN COUNT(fs.sale_id) = 1 THEN 'One-time'
+        WHEN COUNT(fs.sale_id) <= 5 THEN 'Occasional'
+        WHEN COUNT(fs.sale_id) <= 15 THEN 'Regular'
+        ELSE 'Loyal'
+    END as purchase_frequency_segment,
+    CASE 
+        WHEN SUM(fs.revenue) < 1000 THEN 'Low Value'
+        WHEN SUM(fs.revenue) < 5000 THEN 'Medium Value'
+        WHEN SUM(fs.revenue) < 20000 THEN 'High Value'
+        ELSE 'Premium'
+    END as value_segment
+FROM fact_sales fs
+JOIN dim_customer dc ON fs.customer_key = dc.customer_key
+GROUP BY dc.city
+ORDER BY total_revenue DESC;
 
 -- =====================================================
 -- Additional Utility Queries
@@ -307,36 +280,29 @@ ORDER BY segment_revenue DESC;
 SELECT 
     'Total Revenue' as metric,
     SUM(revenue) as value,
-    '₹' || FORMAT(SUM(revenue), '#,##0.00') as formatted_value
+    '₹' || ROUND(SUM(revenue), 2) as formatted_value
 FROM fact_sales
 UNION ALL
 SELECT 
     'Total Transactions' as metric,
     COUNT(sale_id) as value,
-    FORMAT(COUNT(sale_id), '#,##0') as formatted_value
+    CAST(COUNT(sale_id) AS VARCHAR) as formatted_value
 FROM fact_sales
 UNION ALL
 SELECT 
     'Total Customers' as metric,
     COUNT(DISTINCT customer_key) as value,
-    FORMAT(COUNT(DISTINCT customer_key), '#,##0') as formatted_value
+    CAST(COUNT(DISTINCT customer_key) AS VARCHAR) as formatted_value
 FROM fact_sales
 UNION ALL
 SELECT 
     'Total Products' as metric,
     COUNT(DISTINCT product_key) as value,
-    FORMAT(COUNT(DISTINCT product_key), '#,##0') as formatted_value
+    CAST(COUNT(DISTINCT product_key) AS VARCHAR) as formatted_value
 FROM fact_sales
 UNION ALL
 SELECT 
     'Total Stores' as metric,
     COUNT(DISTINCT store_key) as value,
-    FORMAT(COUNT(DISTINCT store_key), '#,##0') as formatted_value
+    CAST(COUNT(DISTINCT store_key) AS VARCHAR) as formatted_value
 FROM fact_sales;
-
--- Performance Optimization Tips:
--- 1. Use date partitions for time-based queries
--- 2. Add indexes on frequently joined columns
--- 3. Consider materialized views for recurring KPIs
--- 4. Use appropriate data types for aggregations
--- 5. Monitor query execution plans regularly
