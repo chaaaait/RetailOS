@@ -8,3 +8,5 @@ apscheduler
 websockets
 streamlit
 plotly
+fastapi
+uvicorn
