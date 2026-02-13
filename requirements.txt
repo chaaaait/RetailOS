@@ -1,3 +1,10 @@
 pandas
 numpy
 faker
+duckdb
+prophet
+scikit-learn
+apscheduler
+websockets
+streamlit
+plotly

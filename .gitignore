@@ -1,6 +1,27 @@
+# Virtual environment
 venv/
+__pycache__/
+*.pyc
+
+# Raw and intermediate data
 data/raw/
 data/quarantine/
-data/warehouse/
-*.parquet
-*.csv
+
+# DuckDB database file (large binary)
+data/warehouse/*.duckdb
+
+# Logs
+logs/
+
+# ML models
+models/
+
+# Environment variables
+.env
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
