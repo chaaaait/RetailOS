@@ -1,27 +1,63 @@
-# Virtual environment
-venv/
+# ===============================
+# Python
+# ===============================
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+*.so
 
-# Raw and intermediate data
+# Virtual environments
+venv/
+.venv/
+env/
+
+# ===============================
+# Data files
+# ===============================
 data/raw/
 data/quarantine/
+*.parquet
+*.csv
+*.db
+*.sqlite
+*.duckdb
 
-# DuckDB database file (large binary)
-data/warehouse/*.duckdb
-
-# Logs
-logs/
-
-# ML models
+# ===============================
+# ML artifacts
+# ===============================
 models/
+*.pkl
+*.joblib
 
-# Environment variables
+# ===============================
+# Logs
+# ===============================
+logs/
+*.log
+
+# ===============================
+# Environment & Secrets
+# ===============================
 .env
+.env.*
+*.env
 
-# VS Code
+# ===============================
+# IDEs
+# ===============================
 .vscode/
+.idea/
 
-# OS files
+# ===============================
+# Testing / cache
+# ===============================
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# ===============================
+# OS
+# ===============================
 .DS_Store
 Thumbs.db
