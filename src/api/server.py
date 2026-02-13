@@ -1,12 +1,17 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import duckdb
-from src.analytics.kpi import get_daily_revenue
+from src.analytics.kpi import (
+    get_daily_revenue,
+    get_city_sales,
+    get_customer_distribution,
+    get_stockout_risks,
+    get_top_product_pairs,
+    get_ai_decisions
+)
 
 app = FastAPI()
 
-con = duckdb.connect("data/warehouse/retail.duckdb")
-
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,18 +24,26 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
-@app.get("/kpi/daily-revenue")
-def daily_revenue_kpi():
-    df = con.execute("""
-        SELECT dd.date, SUM(fs.revenue) as revenue
-        FROM fact_sales fs
-        JOIN dim_date dd ON fs.date_key = dd.date_key
-        GROUP BY dd.date
-        ORDER BY dd.date
-        LIMIT 30
-    """).fetchdf()
-    return df.to_dict(orient="records")
-
 @app.get("/api/kpi/daily-revenue")
-def daily_revenue_api():
+def daily_revenue():
     return get_daily_revenue()
+
+@app.get("/api/kpi/city-sales")
+def city_sales():
+    return get_city_sales()
+
+@app.get("/api/kpi/customer-distribution")
+def customer_distribution():
+    return get_customer_distribution()
+
+@app.get("/api/kpi/stockout-risks")
+def stockout_risks():
+    return get_stockout_risks()
+
+@app.get("/api/kpi/top-product-pairs")
+def top_product_pairs():
+    return get_top_product_pairs()
+
+@app.get("/api/kpi/ai-decisions")
+def ai_decisions():
+    return get_ai_decisions()
